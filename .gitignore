@@ -1,19 +1,42 @@
 .*
 *.o
+*.buildinfo
+*.build
+*.changes
 *.deb
-*.log
+*.dsc
 *.pyc
+*.lock
 
-/debian/cuttlefish-*/
-/debian/*.substvars
-/debian/files
-/debian/*.debhelper
-/debian/debhelper-build-stamp
+cuttlefish-*_*.*.*.tar.xz
 
-equivs.txt
-deps.txt
-ignore-depends-for-*.txt
-*/*/driver-deps
-*/*/driver.txt
+!/.config/
+!/.github/
+!/.kokoro/
+!/.clang-format
 
-!out/.gitkeep
+/*/debian/cuttlefish-*/
+/*/debian/*.substvars
+/*/debian/files
+/*/debian/*.debhelper
+/*/debian/debhelper-build-stamp
+/*/debian/*.log
+
+container/src/podcvd/podcvd
+container/src/podcvd/cuttlefish_mcp_server
+
+frontend/src/operator/webui/src/environments/version.ts
+
+/bazel-*
+/**/bazel-*
+MODULE.bazel.lock
+# Bazel vendor directory, see --vendor_dir in base/cvd/.bazelrc.
+/base/cvd/vendor_src/
+
+/tools/baseimage/create_gce_x86_64_image
+
+# gemini-cli settings
+.gemini/
+
+# GitHub App credentials
+gha-creds-*.json

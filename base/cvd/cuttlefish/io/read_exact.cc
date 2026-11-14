@@ -1,0 +1,66 @@
+//
+// Copyright (C) 2026 The Android Open Source Project
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#include "cuttlefish/io/read_exact.h"
+
+#include <errno.h>
+#include <stddef.h>
+#include <stdint.h>
+
+#include "cuttlefish/io/reader.h"
+#include "cuttlefish/io/reader_seeker.h"
+#include "cuttlefish/result/expect.h"
+#include "cuttlefish/result/result_type.h"
+
+namespace cuttlefish {
+
+Result<void, int> ReadExact(Reader& reader, char* buf, size_t size) {
+  while (size > 0) {
+    uint64_t data_read = CF_EXPECT(reader.Read((void*)buf, size));
+    CF_EXPECTVF(data_read > 0, EIO, "EOF, still want to read {}", size);
+    buf += data_read;
+    size -= data_read;
+  }
+  return {};
+}
+
+Result<void, int> PReadExact(const ReaderSeeker& reader, char* buf, size_t size,
+                             uint64_t offset) {
+  while (size > 0) {
+    uint64_t data_read = CF_EXPECT(reader.PRead((void*)buf, size, offset));
+    CF_EXPECTVF(data_read > 0, EIO, "EOF, still want to read {}", size);
+    buf += data_read;
+    size -= data_read;
+    offset += data_read;
+  }
+  return {};
+}
+
+Result<bool, int> ReadExactOrEof(Reader& reader, char* buf, size_t size) {
+  size_t total_read = 0;
+  while (total_read < size) {
+    uint64_t data_read =
+        CF_EXPECT(reader.Read((void*)(buf + total_read), size - total_read));
+    if (data_read == 0 && total_read == 0) {
+      return false;
+    }
+    CF_EXPECTVF(data_read > 0, EIO, "EOF, still want to read {}",
+                size - total_read);
+    total_read += data_read;
+  }
+  return true;
+}
+
+}  // namespace cuttlefish

@@ -1,0 +1,19 @@
+From f911bc9de442cdfd3a849924d230a6a8590255e3 Mon Sep 17 00:00:00 2001
+Subject: [PATCH 2/4] Make rootcanal_proto public
+
+---
+ BUILD | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/BUILD b/BUILD
+index 7ae8735..2542248 100644
+--- a/BUILD
++++ b/BUILD
+@@ -25,6 +25,7 @@ proto_library(
+     name = "rootcanal_proto",
+     srcs = ["proto/rootcanal/configuration.proto"],
+     strip_import_prefix = "proto",
++    visibility = ["//visibility:public"],
+ )
+ 
+ cc_proto_library(

@@ -1,0 +1,62 @@
+load("//cuttlefish/bazel:rules.bzl", "cf_cc_binary", "cf_cc_library")
+
+package(
+    default_visibility = ["//:android_cuttlefish"],
+)
+
+cf_cc_binary(
+    name = "cvd_internal_start",
+    srcs = [
+        "flag_forwarder.cc",
+        "flag_forwarder.h",
+        "main.cc",
+        "override_bool_arg.cpp",
+        "override_bool_arg.h",
+    ],
+    include_cleaner_enabled = False,
+    deps = [
+        "//cuttlefish/common/libs/fs",
+        "//cuttlefish/common/libs/fs:fd",
+        "//cuttlefish/common/libs/utils:contains",
+        "//cuttlefish/common/libs/utils:environment",
+        "//cuttlefish/common/libs/utils:files",
+        "//cuttlefish/common/libs/utils:gflags_xml_parser",
+        "//cuttlefish/common/libs/utils:tee_logging",
+        "//cuttlefish/files:file_exists",
+        "//cuttlefish/flag_parser",
+        "//cuttlefish/host/commands/start:start_flags",
+        "//cuttlefish/host/libs/config:config_constants",
+        "//cuttlefish/host/libs/config:config_utils",
+        "//cuttlefish/host/libs/config:cuttlefish_config",
+        "//cuttlefish/host/libs/config:host_tools_version",
+        "//cuttlefish/host/libs/config:instance_nums",
+        "//cuttlefish/host/libs/log_names",
+        "//cuttlefish/posix:strerror",
+        "//cuttlefish/posix:symlink",
+        "//cuttlefish/process:command",
+        "//cuttlefish/process:managed_stdio",
+        "//cuttlefish/process:proc_file_utils",
+        "//cuttlefish/process:subprocess",
+        "//cuttlefish/process:subprocess_options",
+        "@abseil-cpp//absl/base:no_destructor",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/log:check",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:string_view",
+        "@android_system_libbase//:file_logging",
+        "@fmt",
+        "@gflags",
+    ],
+)
+
+cf_cc_library(
+    name = "start_flags",
+    srcs = ["start_flags.cpp"],
+    hdrs = ["start_flags.h"],
+    deps = [
+        "//cuttlefish/host/commands/assemble_cvd:flags_defaults",
+        "@gflags",
+    ],
+    # required for the gflags `DEFINE`s when included in other targets
+    alwayslink = 1,
+)

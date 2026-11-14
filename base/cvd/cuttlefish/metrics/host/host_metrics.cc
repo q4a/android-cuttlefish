@@ -1,0 +1,65 @@
+/*
+ * Copyright (C) 2026 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#include "cuttlefish/metrics/host/host_metrics.h"
+
+#include <optional>
+
+#include "cuttlefish/common/libs/utils/container.h"
+#include "cuttlefish/common/libs/utils/host_info.h"
+#include "cuttlefish/metrics/host/gce_environment.h"
+#include "cuttlefish/metrics/host/github_environment.h"
+#include "cuttlefish/metrics/host/invoker.h"
+#include "cuttlefish/metrics/host/kokoro_environment.h"
+#include "cuttlefish/metrics/io/unique_id_file.h"
+#include "cuttlefish/result/result.h"
+
+namespace cuttlefish {
+namespace {
+
+Result<Environment> GetEnvironment() {
+  const std::optional<GitHubRepository> github_environment =
+      DetectGitHubRepository();
+  if (github_environment) {
+    return *github_environment;
+  }
+
+  // must be called before GCE detection, because it is a special case of GCE
+  const std::optional<KokoroEnvironment> kokoroEnvironment =
+      CF_EXPECT(DetectKokoroEnvironment());
+  if (kokoroEnvironment) {
+    return *kokoroEnvironment;
+  }
+
+  const std::optional gce_environment = CF_EXPECT(DetectGceEnvironment());
+  if (gce_environment) {
+    return *gce_environment;
+  }
+
+  return UnknownEnvironment{};
+}
+
+}  // namespace
+
+Result<HostMetrics> GetHostMetrics() {
+  return HostMetrics{.os = GetHostInfo(),
+                     .invoker = GetInvoker(),
+                     .environment = CF_EXPECT(GetEnvironment()),
+                     .user_id = ReadUserIdFile().value_or(""),
+                     .container_runtime = GetContainerRuntime()};
+}
+
+}  // namespace cuttlefish

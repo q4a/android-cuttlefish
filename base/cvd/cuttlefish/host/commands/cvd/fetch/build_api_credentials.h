@@ -1,0 +1,54 @@
+//
+// Copyright (C) 2026 The Android Open Source Project
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#pragma once
+
+#include <memory>
+#include <string>
+
+#include "cuttlefish/host/commands/cvd/fetch/build_api_flags.h"
+#include "cuttlefish/host/libs/web/credential_source/credential_source.h"
+#include "cuttlefish/host/libs/web/http_client/http_client.h"
+#include "cuttlefish/result/result.h"
+
+namespace cuttlefish {
+
+inline constexpr char kAndroidBuildApiScope[] =
+    "https://www.googleapis.com/auth/androidbuild.internal";
+
+inline constexpr char kCloudStorageReadScope[] =
+    "https://www.googleapis.com/auth/devstorage.read_only";
+
+Result<std::unique_ptr<CredentialSource>> GetCredentialSourceFromFlags(
+    HttpClient& http_client, const BuildApiFlags& flags,
+    const std::string& oauth_filepath,
+    const std::string& scope = kAndroidBuildApiScope);
+
+// Resolves credentials for Cloud Storage. Never opens the `credential_source`
+// file, which the Android Build path may consume from a pipe, and never
+// re-uses an Android Build token, which Cloud Storage rejects. A null result
+// means anonymous access, which public buckets serve.
+Result<std::unique_ptr<CredentialSource>> GetStorageCredentialSource(
+    HttpClient& http_client, const BuildApiFlags& flags);
+
+// Resolves credentials for Cloud Storage with `running_on_gce` given instead
+// of read from the DMI product name, so that the ladder can be exercised on
+// any machine.
+Result<std::unique_ptr<CredentialSource>> GetStorageCredentialSource(
+    HttpClient& http_client, const BuildApiFlags& flags, bool running_on_gce);
+
+std::string GetAcloudOauthFilepath();
+
+}  // namespace cuttlefish

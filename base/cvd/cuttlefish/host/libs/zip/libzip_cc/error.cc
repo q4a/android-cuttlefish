@@ -1,0 +1,62 @@
+//
+// Copyright (C) 2025 The Android Open Source Project
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#include "cuttlefish/host/libs/zip/libzip_cc/error.h"
+
+#include <errno.h>
+
+#include <string>
+
+#include "zip.h"
+
+#include "cuttlefish/host/libs/zip/libzip_cc/managed.h"
+
+namespace cuttlefish {
+
+ManagedZipError NewZipError() {
+  ManagedZipError error(new zip_error_t);
+  zip_error_init(error.get());
+  return error;
+}
+
+std::string ZipErrorString(zip_error_t* error) {
+  const std::string err_str(zip_error_strerror(error));
+  zip_error_fini(error);
+  return err_str;
+}
+
+std::string ZipErrorString(zip_source_t* source) {
+  return ZipErrorString(zip_source_error(source));
+}
+
+std::string ZipErrorString(zip_t* source) {
+  return ZipErrorString(zip_get_error(source));
+}
+
+int ZipErrno(zip_error_t* error) {
+  if (zip_error_system_type(error) == ZIP_ET_SYS) {
+    return zip_error_code_system(error);
+  } else {
+    return EPROTO;
+  }
+}
+
+int ZipErrno(zip_source_t* source) {
+  return ZipErrno(zip_source_error(source));
+}
+
+int ZipErrno(zip_t* source) { return ZipErrno(zip_get_error(source)); }
+
+}  // namespace cuttlefish

@@ -1,0 +1,310 @@
+//
+// Copyright (C) 2019 The Android Open Source Project
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#include "cuttlefish/host/commands/run_cvd/launch/streamer.h"
+
+#include <sys/socket.h>
+
+#include <string>
+#include <unordered_set>
+#include <utility>
+#include <vector>
+
+#include "absl/log/log.h"
+#include "absl/strings/str_join.h"
+#include "fmt/format.h"
+#include "fruit/component.h"
+#include "fruit/fruit_forward_decls.h"
+#include "fruit/macro.h"
+
+#include "cuttlefish/common/libs/fs/shared_fd.h"
+#include "cuttlefish/host/commands/run_cvd/launch/enable_multitouch.h"
+#include "cuttlefish/host/commands/run_cvd/launch/input_paths_provider.h"
+#include "cuttlefish/host/commands/run_cvd/launch/sensors_socket_pair.h"
+#include "cuttlefish/host/commands/run_cvd/launch/virtual_tuner_server.h"
+#include "cuttlefish/host/commands/run_cvd/launch/webrtc_controller.h"
+#include "cuttlefish/host/commands/run_cvd/reporting.h"
+#include "cuttlefish/host/libs/config/config_utils.h"
+#include "cuttlefish/host/libs/config/custom_actions.h"
+#include "cuttlefish/host/libs/config/cuttlefish_config.h"
+#include "cuttlefish/host/libs/config/gpu_mode.h"
+#include "cuttlefish/host/libs/config/known_paths.h"
+#include "cuttlefish/host/libs/feature/command_source.h"
+#include "cuttlefish/host/libs/feature/feature.h"
+#include "cuttlefish/host/libs/feature/kernel_log_pipe_provider.h"
+#include "cuttlefish/metrics/host/invoker.h"
+#include "cuttlefish/posix/strerror.h"
+#include "cuttlefish/process/command.h"
+#include "cuttlefish/process/subprocess.h"
+#include "cuttlefish/result/result.h"
+
+namespace cuttlefish {
+
+namespace {
+
+SharedFD CreateUnixInputServer(const std::string& path) {
+  auto server =
+      SharedFD::SocketLocalServer(path.c_str(), false, SOCK_STREAM, 0666);
+  if (!server->IsOpen()) {
+    LOG(ERROR) << "Unable to create unix input server: " << server->StrError();
+    return {};
+  }
+  return server;
+}
+
+std::vector<Command> LaunchCustomActionServers(
+    Command& webrtc_cmd,
+    const std::vector<CustomActionServerConfig>& custom_actions) {
+  bool first = true;
+  std::vector<Command> commands;
+  for (const auto& custom_action : custom_actions) {
+    // Create a socket pair that will be used for communication between
+    // WebRTC and the action server.
+    SharedFD webrtc_socket, action_server_socket;
+    if (!SharedFD::SocketPair(AF_LOCAL, SOCK_STREAM, 0, &webrtc_socket,
+                              &action_server_socket)) {
+      LOG(ERROR) << "Unable to create custom action server socket pair: "
+                 << StrError();
+      continue;
+    }
+
+    // Launch the action server, providing its socket pair fd as the only
+    // argument.
+    auto binary = HostBinaryPath(custom_action.server);
+    Command command(binary);
+    command.AddParameter(action_server_socket);
+    commands.emplace_back(std::move(command));
+
+    // Pass the WebRTC socket pair fd to WebRTC.
+    if (first) {
+      first = false;
+      webrtc_cmd.AddParameter("-action_servers=", custom_action.server, ":",
+                              webrtc_socket);
+    } else {
+      webrtc_cmd.AppendToLastParameter(",", custom_action.server, ":",
+                                       webrtc_socket);
+    }
+  }
+  return commands;
+}
+
+// Creates the frame and input sockets and add the relevant arguments to
+// webrtc commands
+class StreamerSockets : public virtual SetupFeature {
+ public:
+  INJECT(StreamerSockets(const CuttlefishConfig& config,
+                         InputPathsProvider& input_paths_provider,
+                         const CuttlefishConfig::InstanceSpecific& instance))
+      : config_(config),
+        instance_(instance),
+        input_paths_provider_(input_paths_provider) {}
+
+  void AppendCommandArguments(Command& cmd) {
+    const int touch_count = instance_.display_configs().size() +
+                            instance_.touchpad_configs().size();
+    if (touch_count > 0) {
+      cmd.AddParameter("--multitouch=", ShouldEnableMultitouch(instance_));
+      std::vector<std::string> touch_paths =
+          input_paths_provider_.TouchscreenPaths();
+      for (const std::string& touchpad_path :
+           input_paths_provider_.TouchpadPaths()) {
+        touch_paths.push_back(touchpad_path);
+      }
+      cmd.AddParameter("-touch_server_paths=", absl::StrJoin(touch_paths, ","));
+    }
+    if (instance_.enable_mouse()) {
+      cmd.AddParameter("-mouse_server_path=",
+                       input_paths_provider_.MousePath());
+    }
+    if (instance_.enable_gamepad()) {
+      cmd.AddParameter("-gamepad_server_path=",
+                       input_paths_provider_.GamepadPath());
+    }
+    cmd.AddParameter("-rotary_server_path=",
+                     input_paths_provider_.RotaryDevicePath());
+    cmd.AddParameter("-keyboard_server_path=",
+                     input_paths_provider_.KeyboardPath());
+    cmd.AddParameter("-frame_server_fd=", frames_server_);
+    if (instance_.enable_audio()) {
+      cmd.AddParameter("--audio_server_fd=", audio_server_);
+      if (HasVirtualTunerStream(instance_)) {
+        cmd.AddParameter("--tuner_pcm_socket_path=",
+                         VirtualTunerPcmSocketPath(instance_));
+      }
+    }
+    cmd.AddParameter("-switches_server_path=",
+                     input_paths_provider_.SwitchesPath());
+  }
+
+  // SetupFeature
+  std::string Name() const override { return "StreamerSockets"; }
+  bool Enabled() const override {
+    bool is_accelerated = !IsGuestRenderingMode(instance_.gpu_mode());
+    return !(VmManagerIsQemu(config_) && is_accelerated);
+  }
+
+ private:
+  std::unordered_set<SetupFeature*> Dependencies() const override {
+    return {&input_paths_provider_};
+  }
+
+  Result<void> ResultSetup() override {
+    frames_server_ = CreateUnixInputServer(instance_.frames_socket_path());
+    CF_EXPECT(frames_server_->IsOpen(), frames_server_->StrError());
+    // TODO(schuffelen): Make this a separate optional feature?
+    if (instance_.enable_audio()) {
+      auto path = config_.ForDefaultInstance().audio_server_path();
+      audio_server_ =
+          SharedFD::SocketLocalServer(path, false, SOCK_SEQPACKET, 0666);
+      CF_EXPECT(audio_server_->IsOpen(), audio_server_->StrError());
+    }
+    return {};
+  }
+
+  const CuttlefishConfig& config_;
+  const CuttlefishConfig::InstanceSpecific instance_;
+  InputPathsProvider& input_paths_provider_;
+  SharedFD frames_server_;
+  SharedFD audio_server_;
+};
+
+class WebRtcServer : public virtual CommandSource,
+                     public DiagnosticInformation,
+                     public KernelLogPipeConsumer {
+ public:
+  INJECT(WebRtcServer(const CuttlefishConfig& config,
+                      const CuttlefishConfig::InstanceSpecific& instance,
+                      StreamerSockets& sockets,
+                      KernelLogPipeProvider& log_pipe_provider,
+                      const CustomActionConfigProvider& custom_action_config,
+                      WebRtcController& webrtc_controller,
+                      AutoSensorsSocketPair::Type& sensors_socket_pair))
+      : config_(config),
+        instance_(instance),
+        sockets_(sockets),
+        log_pipe_provider_(log_pipe_provider),
+        custom_action_config_(custom_action_config),
+        webrtc_controller_(webrtc_controller),
+        sensors_socket_pair_(sensors_socket_pair) {}
+  // DiagnosticInformation
+  std::vector<std::string> Diagnostics() const override {
+    if (!Enabled()) {
+      return {};
+    }
+    std::string url;
+    if (GetInvoker() == Invoker::Podcvd) {
+      // Container image used by podcvd always contains `cuttlefish-user` debian
+      // package. URL starting with `https://localhost:1443` is required as port
+      // 1443 in the container is exposed via port forwarding. When printing
+      // this message by run_cvd in the container, podcvd captures the message
+      // and modify URL with proper IP address and port.
+      url = fmt::format("https://localhost:1443/devices/{}/files/client.html",
+                        instance_.webrtc_device_id());
+    } else {
+      url =
+          fmt::format("https://localhost:{}", config_.sig_server_proxy_port());
+    }
+    return {fmt::format("Point your browser to {} to interact with the device.",
+                        url)};
+  }
+
+  // CommandSource
+  Result<std::vector<MonitorCommand>> Commands() override {
+    std::vector<MonitorCommand> commands;
+
+    // Start a TCP proxy to make the host signaling server available on the
+    // legacy port.
+    Command sig_proxy(WebRtcSigServerProxyBinary());
+    sig_proxy.AddParameter("-server_port=", config_.sig_server_proxy_port());
+    commands.emplace_back(std::move(sig_proxy), /* is_critical= */ false);
+
+    auto stopper = [webrtc_controller = webrtc_controller_]() mutable {
+      (void)webrtc_controller.SendStopRecordingCommand();
+      return StopperResult::kFailure;
+    };
+
+    Command webrtc(WebRtcBinary(), KillSubprocessFallback(stopper));
+
+    webrtc.UnsetFromEnvironment("http_proxy");
+    sockets_.AppendCommandArguments(webrtc);
+    webrtc.AddParameter("--command_fd=", webrtc_controller_.GetClientSocket());
+    webrtc.AddParameter("-kernel_log_events_fd=", kernel_log_events_pipe_);
+    webrtc.AddParameter("-client_dir=",
+                        DefaultHostArtifactsPath("usr/share/webrtc/assets"));
+
+    // TODO get from launcher params
+    const auto& actions =
+        custom_action_config_.CustomActionServers(instance_.id());
+    for (auto& action : LaunchCustomActionServers(webrtc, actions)) {
+      commands.emplace_back(std::move(action));
+    }
+
+    webrtc.AddParameter("-sensors_fd=",
+                        sensors_socket_pair_->sensors_simulator_socket);
+
+    commands.emplace_back(std::move(webrtc));
+    return commands;
+  }
+
+  // SetupFeature
+  bool Enabled() const override {
+    return sockets_.Enabled() && instance_.gpu_mode() != GpuMode::None &&
+           (VmManagerIsCrosvm(config_) || VmManagerIsQemu(config_)) &&
+           instance_.enable_webrtc();
+  }
+
+ private:
+  std::string Name() const override { return "WebRtcServer"; }
+  std::unordered_set<SetupFeature*> Dependencies() const override {
+    return {static_cast<SetupFeature*>(&sockets_),
+            static_cast<SetupFeature*>(&log_pipe_provider_),
+            static_cast<SetupFeature*>(&webrtc_controller_),
+            static_cast<SetupFeature*>(&sensors_socket_pair_)};
+  }
+
+  Result<void> ResultSetup() override {
+    kernel_log_events_pipe_ = log_pipe_provider_.KernelLogPipe();
+    CF_EXPECT(kernel_log_events_pipe_->IsOpen(),
+              kernel_log_events_pipe_->StrError());
+    return {};
+  }
+
+  const CuttlefishConfig& config_;
+  const CuttlefishConfig::InstanceSpecific instance_;
+  StreamerSockets& sockets_;
+  KernelLogPipeProvider& log_pipe_provider_;
+  const CustomActionConfigProvider& custom_action_config_;
+  WebRtcController& webrtc_controller_;
+  SharedFD kernel_log_events_pipe_;
+  SharedFD switches_server_;
+  AutoSensorsSocketPair::Type& sensors_socket_pair_;
+};
+
+}  // namespace
+
+fruit::Component<fruit::Required<
+    const CuttlefishConfig, KernelLogPipeProvider, InputPathsProvider,
+    const CuttlefishConfig::InstanceSpecific, const CustomActionConfigProvider,
+    WebRtcController>>
+launchStreamerComponent() {
+  return fruit::createComponent()
+      .addMultibinding<CommandSource, WebRtcServer>()
+      .addMultibinding<DiagnosticInformation, WebRtcServer>()
+      .addMultibinding<KernelLogPipeConsumer, WebRtcServer>()
+      .addMultibinding<SetupFeature, StreamerSockets>()
+      .addMultibinding<SetupFeature, WebRtcServer>();
+}
+
+}  // namespace cuttlefish

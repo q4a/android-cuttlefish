@@ -1,0 +1,32 @@
+load("//cuttlefish/bazel:rules.bzl", "cf_cc_library")
+
+package(
+    default_visibility = ["//:android_cuttlefish"],
+)
+
+cf_cc_library(
+    name = "fake_nfnetlink_socket",
+    testonly = True,
+    srcs = ["fake_nfnetlink_socket.cc"],
+    hdrs = ["fake_nfnetlink_socket.h"],
+    deps = [
+        "//allocd/net:nfnetlink_socket",
+        "//cuttlefish/result",
+    ],
+)
+
+cf_cc_library(
+    name = "nft_messages_helper",
+    testonly = True,
+    srcs = ["nft_messages_helper.cc"],
+    hdrs = ["nft_messages_helper.h"],
+    target_compatible_with = [
+        "@platforms//os:linux",
+    ],
+    deps = [
+        "//allocd/net:netlink",
+        "//linux_headers",
+        "@abseil-cpp//absl/strings:string_view",
+        "@googletest//:gtest",
+    ],
+)

@@ -1,0 +1,117 @@
+/*
+ * Copyright (C) 2024 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#include "cuttlefish/host/commands/cvd/instances/operator_client.h"
+
+#include <stdint.h>
+#include <sys/socket.h>
+
+#include <memory>
+#include <sstream>
+#include <string>
+#include <vector>
+
+#include "absl/strings/string_view.h"
+#include "fmt/base.h"
+#include "fmt/ostream.h"
+#include "json/value.h"
+
+#include "cuttlefish/common/libs/fs/shared_fd.h"
+#include "cuttlefish/common/libs/utils/json.h"
+#include "cuttlefish/common/libs/utils/users.h"
+#include "cuttlefish/host/commands/cvd/instances/local_instance.h"
+#include "cuttlefish/host/commands/cvd/instances/local_instance_group.h"
+#include "cuttlefish/io/write_exact.h"
+#include "cuttlefish/result/result.h"
+
+namespace cuttlefish {
+
+namespace {
+Result<Json::Value> BuildPreRegistrationMsg(
+    const LocalInstanceGroup& group,
+    const std::vector<LocalInstance>& instances) {
+  Json::Value msg;
+  msg["message_type"] = "pre-register";
+  msg["group_name"] = group.GroupName();
+  msg["owner"] = CF_EXPECT(CurrentUserName());
+  Json::Value devices(Json::arrayValue);
+  for (const LocalInstance& instance : instances) {
+    Json::Value dev;
+    dev["id"] = instance.WebRtcDeviceId();
+    dev["name"] = instance.Name();
+    dev["adb_port"] = instance.AdbPort();
+    devices.append(dev);
+  }
+  msg["devices"] = devices;
+  return msg;
+}
+
+Result<Json::Value> RecvMsg(SharedFD fd) {
+  std::vector<char> buf(4096, '\0');
+  uint64_t data_read = CF_EXPECT(fd->Read(buf.data(), buf.size()));
+  CF_EXPECT(data_read != 0,
+            "The operator closed the connection without responding");
+  return CF_EXPECT(ParseJson(absl::string_view(buf.data(), data_read)),
+                   "Failed to parse operator response");
+}
+}  // namespace
+
+Result<std::unique_ptr<OperatorControlConn>> OperatorControlConn::Create(
+    const std::string& socket_path) {
+  auto fd = SharedFD::SocketLocalClient(socket_path, false, SOCK_SEQPACKET);
+  CF_EXPECTF(fd->IsOpen(), "Failed to connect to control socket: {}",
+             fd->StrError());
+  return std::unique_ptr<OperatorControlConn>(new OperatorControlConn(fd));
+}
+
+/**
+ * Pre-registers an instance group with the operator
+ */
+Result<void> OperatorControlConn::Preregister(const LocalInstanceGroup& group) {
+  return Preregister(group, group.Instances());
+}
+
+Result<void> OperatorControlConn::Preregister(
+    const LocalInstanceGroup& group,
+    const std::vector<LocalInstance>& instances) {
+  const Json::Value pre_registration_msg =
+      CF_EXPECT(BuildPreRegistrationMsg(group, instances));
+  CF_EXPECT(WriteExact(*conn_, pre_registration_msg.toStyledString()),
+            "Failed to send pre-registration message to operator");
+  const Json::Value response =
+      CF_EXPECT(RecvMsg(conn_), "Error receiving pre-registration response");
+
+  std::stringstream error_messages;
+  bool errors_found = false;
+  for (const Json::Value& res :
+       CF_EXPECT(GetArrayValues<Json::Value>(response, {}))) {
+    const std::string id = CF_EXPECT(GetValue<std::string>(res, {"id"}));
+    const std::string status =
+        CF_EXPECT(GetValue<std::string>(res, {"status"}));
+    const std::string message =
+        CF_EXPECT(GetValue<std::string>(res, {"message"}));
+    if (status != "accepted") {
+      fmt::print(error_messages, "\nid: {}, status: {}, message: {}", id,
+                 status, message);
+      errors_found = true;
+    }
+  }
+  CF_EXPECTF(!errors_found,
+             "Operator reported error pre-registering instances: {}",
+             error_messages.str());
+  return {};
+}
+}  // namespace cuttlefish

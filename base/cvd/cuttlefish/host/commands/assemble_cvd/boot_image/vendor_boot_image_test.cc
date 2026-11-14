@@ -1,0 +1,117 @@
+//
+// Copyright (C) 2026 The Android Open Source Project
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#include "cuttlefish/host/commands/assemble_cvd/boot_image/vendor_boot_image.h"
+
+#include <stdint.h>
+
+#include <memory>
+#include <optional>
+#include <utility>
+
+#include "absl/strings/string_view.h"
+#include "gmock/gmock.h"
+#include "gtest/gtest.h"
+
+#include "cuttlefish/host/commands/assemble_cvd/boot_image/vendor_boot_image_builder.h"
+#include "cuttlefish/io/concat.h"
+#include "cuttlefish/io/owning_in_memory_io.h"
+#include "cuttlefish/io/read_window_view.h"
+#include "cuttlefish/io/string.h"
+#include "cuttlefish/result/assert.h"
+#include "cuttlefish/result/result_matchers.h"
+
+namespace cuttlefish {
+namespace {
+
+TEST(VendorBootImageTest, AllFieldsSet) {
+  static constexpr uint32_t kPageSize = 4096;
+  static constexpr uint32_t kKernelAddr = 1;
+  static constexpr uint32_t kRamdiskAddr = 2;
+  static constexpr absl::string_view kVendorRamdisk = "vendor ramdisk";
+  static constexpr absl::string_view kKernelCommandLine = "kernel cmdline";
+  static constexpr uint32_t kTagsAddr = 3;
+  static constexpr absl::string_view kName = "name";
+  static constexpr absl::string_view kDtb = "dtb";
+  static constexpr uint64_t kDtbAddr = 4;
+  static constexpr absl::string_view kBootconfig = "bootconfig";
+
+  VendorBootImageBuilder builder =
+      VendorBootImageBuilder()
+          .PageSize(kPageSize)
+          .KernelAddr(kKernelAddr)
+          .RamdiskAddr(kRamdiskAddr)
+          .VendorRamdisk(std::make_unique<OwningInMemoryIo>(kVendorRamdisk))
+          .KernelCommandLine(kKernelCommandLine)
+          .TagsAddr(kTagsAddr)
+          .Name(kName)
+          .Dtb(std::make_unique<OwningInMemoryIo>(kDtb))
+          .DtbAddr(kDtbAddr)
+          .Bootconfig(std::make_unique<OwningInMemoryIo>(kBootconfig));
+  ConcatReaderSeeker image = CF_ASSERT(builder.BuildV4());
+
+  VendorBootImage parsed = CF_ASSERT(VendorBootImage::Read(
+      std::make_unique<ConcatReaderSeeker>(std::move(image))));
+
+  EXPECT_EQ(parsed.PageSize(), kPageSize);
+  EXPECT_EQ(parsed.KernelAddr(), kKernelAddr);
+  EXPECT_EQ(parsed.RamdiskAddr(), kRamdiskAddr);
+
+  EXPECT_THAT(ReadToString(parsed.VendorRamdisk()),
+              IsOkAndValue(kVendorRamdisk));
+  EXPECT_EQ(parsed.KernelCommandLine(), kKernelCommandLine);
+  EXPECT_EQ(parsed.TagsAddr(), kTagsAddr);
+  EXPECT_EQ(parsed.Name(), kName);
+  EXPECT_THAT(ReadToString(parsed.Dtb()), IsOkAndValue(kDtb));
+  EXPECT_EQ(parsed.DtbAddr(), kDtbAddr);
+
+  std::optional<ReadWindowView> bootconfig = parsed.Bootconfig();
+  ASSERT_TRUE(bootconfig.has_value());
+  EXPECT_THAT(ReadToString(*bootconfig), IsOkAndValue(kBootconfig));
+}
+
+TEST(VendorBootImageTest, NoFieldsSet) {
+  ConcatReaderSeeker image = CF_ASSERT(VendorBootImageBuilder().BuildV4());
+
+  VendorBootImage parsed = CF_ASSERT(VendorBootImage::Read(
+      std::make_unique<ConcatReaderSeeker>(std::move(image))));
+
+  EXPECT_EQ(parsed.PageSize(), VendorBootImageBuilder::kDefaultPageSize);
+  EXPECT_EQ(parsed.KernelAddr(),
+            VendorBootImageBuilder::kDefaultBaseAddress +
+                VendorBootImageBuilder::kDefaultKernelOffset);
+  EXPECT_EQ(parsed.RamdiskAddr(),
+            VendorBootImageBuilder::kDefaultBaseAddress +
+                VendorBootImageBuilder::kDefaultRamdiskOffset);
+
+  EXPECT_THAT(ReadToString(parsed.VendorRamdisk()), IsOkAndValue(""));
+
+  EXPECT_EQ(parsed.KernelCommandLine(), "");
+  EXPECT_EQ(parsed.TagsAddr(), VendorBootImageBuilder::kDefaultBaseAddress +
+                                   VendorBootImageBuilder::kDefaultTagsOffset);
+  EXPECT_EQ(parsed.Name(), "");
+
+  EXPECT_THAT(ReadToString(parsed.Dtb()), IsOkAndValue(""));
+
+  EXPECT_EQ(parsed.DtbAddr(), VendorBootImageBuilder::kDefaultBaseAddress +
+                                  VendorBootImageBuilder::kDefaultDtbOffset);
+
+  std::optional<ReadWindowView> bootconfig = parsed.Bootconfig();
+  ASSERT_TRUE(bootconfig.has_value());
+  EXPECT_THAT(ReadToString(*bootconfig), IsOkAndValue(""));
+}
+
+}  // namespace
+}  // namespace cuttlefish

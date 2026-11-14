@@ -1,0 +1,39 @@
+load("//cuttlefish/bazel:rules.bzl", "cf_build_test", "cf_cc_library")
+
+package(
+    default_visibility = ["//:android_cuttlefish"],
+)
+
+cf_build_test(name = "screen_connector_build_test")
+
+cf_cc_library(
+    name = "video_frame_buffer",
+    hdrs = ["video_frame_buffer.h"],
+)
+
+cf_cc_library(
+    name = "screen_connector",
+    srcs = [
+        "composition_manager.cpp",
+        "ring_buffer_manager.cpp",
+    ],
+    hdrs = [
+        "composition_manager.h",
+        "ring_buffer_manager.h",
+    ],
+    include_cleaner_enabled = False,
+    deps = [
+        ":video_frame_buffer",
+        "//cuttlefish/common/libs/fs:fd",
+        "//cuttlefish/common/libs/fs:scoped_mmap",
+        "//cuttlefish/host/libs/config:cuttlefish_config",
+        "//cuttlefish/host/libs/wayland:wayland_server_callbacks",
+        "//cuttlefish/result",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:string_view",
+        "@fmt",
+        "@libdrm//:libdrm_fourcc",
+        "@libyuv",
+    ],
+)

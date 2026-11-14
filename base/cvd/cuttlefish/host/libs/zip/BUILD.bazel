@@ -1,0 +1,150 @@
+load("//cuttlefish/bazel:rules.bzl", "cf_cc_library", "cf_cc_test")
+
+package(
+    default_visibility = ["//:android_cuttlefish"],
+)
+
+cf_cc_library(
+    name = "buffered_zip_source",
+    srcs = ["buffered_zip_source.cc"],
+    hdrs = ["buffered_zip_source.h"],
+    deps = [
+        "//cuttlefish/host/libs/zip/libzip_cc:archive",
+        "//cuttlefish/host/libs/zip/libzip_cc:seekable_source",
+        "//cuttlefish/host/libs/zip/libzip_cc:source_callback",
+        "//cuttlefish/io:length",
+        "//cuttlefish/io:reader_seeker",
+        "//cuttlefish/result",
+        "@abseil-cpp//absl/log",
+    ],
+)
+
+cf_cc_test(
+    name = "buffered_zip_source_test",
+    srcs = ["buffered_zip_source_test.cc"],
+    deps = [
+        "//cuttlefish/host/libs/zip:buffered_zip_source",
+        "//cuttlefish/host/libs/zip/libzip_cc:seekable_source",
+        "//cuttlefish/host/libs/zip/libzip_cc:writable_source",
+        "//cuttlefish/io:owning_in_memory_io",
+        "//cuttlefish/result:assert",
+        "//cuttlefish/result:result_matchers",
+    ],
+)
+
+cf_cc_library(
+    name = "cached_zip_source",
+    srcs = ["cached_zip_source.cc"],
+    hdrs = ["cached_zip_source.h"],
+    deps = [
+        "//cuttlefish/host/libs/zip/libzip_cc:seekable_source",
+        "//cuttlefish/host/libs/zip/libzip_cc:source_callback",
+        "//cuttlefish/host/libs/zip/libzip_cc:stat",
+        "//cuttlefish/io:lazily_loaded_file",
+        "//cuttlefish/io:reader_seeker",
+        "//cuttlefish/result",
+        "@abseil-cpp//absl/log",
+    ],
+)
+
+cf_cc_test(
+    name = "cached_zip_source_test",
+    srcs = ["cached_zip_source_test.cc"],
+    deps = [
+        "//cuttlefish/host/libs/zip:cached_zip_source",
+        "//cuttlefish/host/libs/zip:zip_string",
+        "//cuttlefish/host/libs/zip/libzip_cc:seekable_source",
+        "//cuttlefish/result",
+        "//cuttlefish/result:result_matchers",
+    ],
+)
+
+cf_cc_library(
+    name = "remote_zip",
+    srcs = ["remote_zip.cc"],
+    hdrs = ["remote_zip.h"],
+    deps = [
+        "//cuttlefish/host/libs/web/http_client",
+        "//cuttlefish/host/libs/web/http_client:http_probe",
+        "//cuttlefish/host/libs/zip/libzip_cc:seekable_source",
+        "//cuttlefish/host/libs/zip/libzip_cc:source_callback",
+        "//cuttlefish/result",
+        "@abseil-cpp//absl/log",
+        "@fmt",
+    ],
+)
+
+cf_cc_test(
+    name = "remote_zip_test",
+    srcs = ["remote_zip_test.cc"],
+    deps = [
+        "//cuttlefish/host/libs/web/http_client:fake_http_client",
+        "//cuttlefish/host/libs/zip:remote_zip",
+        "//cuttlefish/host/libs/zip:zip_over_ranges",
+        "//cuttlefish/host/libs/zip/libzip_cc:archive",
+        "//cuttlefish/host/libs/zip/libzip_cc:seekable_source",
+        "//cuttlefish/io:reader_seeker",
+        "//cuttlefish/io:string",
+        "//cuttlefish/result",
+        "//cuttlefish/result:result_matchers",
+    ],
+)
+
+cf_cc_library(
+    name = "zip_file",
+    srcs = ["zip_file.cc"],
+    hdrs = ["zip_file.h"],
+    deps = [
+        "//cuttlefish/host/libs/zip/libzip_cc:archive",
+        "//cuttlefish/host/libs/zip/libzip_cc:readable_source",
+        "//cuttlefish/host/libs/zip/libzip_cc:writable_source",
+        "//cuttlefish/io:copy",
+        "//cuttlefish/io:native_filesystem",
+        "//cuttlefish/io:reader_seeker",
+        "//cuttlefish/io:writer_seeker",
+        "//cuttlefish/posix:strerror",
+        "//cuttlefish/result",
+        "@abseil-cpp//absl/strings:string_view",
+    ],
+)
+
+cf_cc_test(
+    name = "zip_file_test",
+    srcs = ["zip_file_test.cc"],
+    deps = [
+        "//cuttlefish/host/libs/zip:zip_file",
+        "//cuttlefish/host/libs/zip/libzip_cc:archive",
+        "//cuttlefish/result",
+        "//cuttlefish/result:result_matchers",
+    ],
+)
+
+cf_cc_library(
+    name = "zip_string",
+    srcs = ["zip_string.cc"],
+    hdrs = ["zip_string.h"],
+    deps = [
+        "//cuttlefish/host/libs/zip/libzip_cc:archive",
+        "//cuttlefish/host/libs/zip/libzip_cc:readable_source",
+        "//cuttlefish/host/libs/zip/libzip_cc:writable_source",
+        "//cuttlefish/io:string",
+        "//cuttlefish/result",
+    ],
+)
+
+cf_cc_library(
+    name = "zip_over_ranges",
+    testonly = True,
+    srcs = ["zip_over_ranges.cc"],
+    hdrs = ["zip_over_ranges.h"],
+    deps = [
+        "//cuttlefish/host/libs/web/http_client",
+        "//cuttlefish/host/libs/zip:zip_string",
+        "//cuttlefish/host/libs/zip/libzip_cc:archive",
+        "//cuttlefish/host/libs/zip/libzip_cc:writable_source",
+        "//cuttlefish/result",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:string_view",
+        "@fmt",
+    ],
+)

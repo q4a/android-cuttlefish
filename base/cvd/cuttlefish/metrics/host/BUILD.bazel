@@ -1,0 +1,70 @@
+load("//cuttlefish/bazel:rules.bzl", "cf_build_test", "cf_cc_library")
+
+package(
+    default_visibility = ["//:android_cuttlefish"],
+)
+
+cf_build_test(name = "host_build_test")
+
+cf_cc_library(
+    name = "gce_environment",
+    srcs = ["gce_environment.cc"],
+    hdrs = ["gce_environment.h"],
+    deps = [
+        "//cuttlefish/host/libs/web/http_client",
+        "//cuttlefish/host/libs/web/http_client:curl_http_client",
+        "//cuttlefish/host/libs/web/http_client:http_string",
+        "//cuttlefish/result",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:string_view",
+        "@fmt",
+    ],
+)
+
+cf_cc_library(
+    name = "github_environment",
+    srcs = ["github_environment.cc"],
+    hdrs = ["github_environment.h"],
+    deps = [
+        "//cuttlefish/common/libs/utils:environment",
+        "@abseil-cpp//absl/strings:string_view",
+    ],
+)
+
+cf_cc_library(
+    name = "host_metrics",
+    srcs = ["host_metrics.cc"],
+    hdrs = ["host_metrics.h"],
+    deps = [
+        "//cuttlefish/common/libs/utils:container",
+        "//cuttlefish/common/libs/utils:host_info",
+        "//cuttlefish/metrics/host:gce_environment",
+        "//cuttlefish/metrics/host:github_environment",
+        "//cuttlefish/metrics/host:invoker",
+        "//cuttlefish/metrics/host:kokoro_environment",
+        "//cuttlefish/metrics/io:unique_id_file",
+        "//cuttlefish/result",
+    ],
+)
+
+cf_cc_library(
+    name = "invoker",
+    srcs = ["invoker.cc"],
+    hdrs = ["invoker.h"],
+    deps = [
+        "//cuttlefish/common/libs/utils:environment",
+        "@abseil-cpp//absl/strings:string_view",
+    ],
+)
+
+cf_cc_library(
+    name = "kokoro_environment",
+    srcs = ["kokoro_environment.cc"],
+    hdrs = ["kokoro_environment.h"],
+    deps = [
+        "//cuttlefish/common/libs/utils:environment",
+        "//cuttlefish/metrics/host:gce_environment",
+        "//cuttlefish/result",
+        "@abseil-cpp//absl/strings:string_view",
+    ],
+)

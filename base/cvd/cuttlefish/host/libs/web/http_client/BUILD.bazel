@@ -1,0 +1,210 @@
+load("//cuttlefish/bazel:rules.bzl", "cf_build_test", "cf_cc_library", "cf_cc_test")
+
+package(
+    default_visibility = ["//:android_cuttlefish"],
+)
+
+cf_build_test(name = "http_client_build_test")
+
+cf_cc_library(
+    name = "curl_global_init",
+    srcs = ["curl_global_init.cpp"],
+    hdrs = ["curl_global_init.h"],
+    visibility = ["//visibility:private"],
+    deps = ["@curl"],
+)
+
+cf_cc_library(
+    name = "curl_http_client",
+    srcs = ["curl_http_client.cc"],
+    hdrs = ["curl_http_client.h"],
+    deps = [
+        "//cuttlefish/common/libs/utils:environment",
+        "//cuttlefish/files:file_exists",
+        "//cuttlefish/host/libs/web/http_client",
+        "//cuttlefish/host/libs/web/http_client:curl_global_init",
+        "//cuttlefish/host/libs/web/http_client:curl_share",
+        "//cuttlefish/host/libs/web/http_client:scrub_secrets",
+        "//cuttlefish/result",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:string_view",
+        "@curl",
+    ],
+)
+
+cf_cc_library(
+    name = "curl_share",
+    srcs = ["curl_share.cc"],
+    hdrs = ["curl_share.h"],
+    deps = [
+        "//cuttlefish/host/libs/web/http_client:curl_global_init",
+        "@abseil-cpp//absl/log:check",
+        "@curl",
+    ],
+)
+
+cf_cc_library(
+    name = "curl_url",
+    srcs = ["curl_url.cc"],
+    hdrs = ["curl_url.h"],
+    deps = [
+        "//cuttlefish/host/libs/web/http_client:curl_global_init",
+        "//cuttlefish/result",
+        "@abseil-cpp//absl/strings:string_view",
+        "@curl",
+    ],
+)
+
+cf_cc_library(
+    name = "fake_http_client",
+    testonly = True,
+    srcs = ["fake_http_client.cc"],
+    hdrs = ["fake_http_client.h"],
+    deps = [
+        "//cuttlefish/host/libs/web/http_client",
+        "//cuttlefish/result",
+        "@abseil-cpp//absl/strings:string_view",
+    ],
+)
+
+cf_cc_test(
+    name = "fake_http_client_test",
+    srcs = ["fake_http_client_test.cc"],
+    deps = [
+        "//cuttlefish/host/libs/web/http_client",
+        "//cuttlefish/host/libs/web/http_client:fake_http_client",
+        "//cuttlefish/host/libs/web/http_client:http_string",
+        "//cuttlefish/result",
+        "//cuttlefish/result:result_matchers",
+    ],
+)
+
+cf_cc_library(
+    name = "http_client",
+    srcs = ["http_client.cc"],
+    hdrs = ["http_client.h"],
+    deps = [
+        "//cuttlefish/result",
+        "@abseil-cpp//absl/strings:string_view",
+        "@fmt",
+    ],
+)
+
+cf_cc_library(
+    name = "http_client_pool",
+    srcs = ["http_client_pool.cc"],
+    hdrs = ["http_client_pool.h"],
+    deps = [
+        "//cuttlefish/host/libs/web/http_client",
+        "//cuttlefish/result:expect",
+        "//cuttlefish/result:result_type",
+        "@abseil-cpp//absl/log:check",
+    ],
+)
+
+cf_cc_library(
+    name = "http_file",
+    srcs = ["http_file.cc"],
+    hdrs = ["http_file.h"],
+    deps = [
+        "//cuttlefish/common/libs/fs",
+        "//cuttlefish/common/libs/fs:shared_fd_stream",
+        "//cuttlefish/common/libs/utils:files",
+        "//cuttlefish/host/libs/web/http_client",
+        "//cuttlefish/host/libs/web/http_client:scrub_secrets",
+        "//cuttlefish/posix:remove",
+        "//cuttlefish/result",
+        "@abseil-cpp//absl/log",
+    ],
+)
+
+cf_cc_library(
+    name = "http_json",
+    srcs = ["http_json.cc"],
+    hdrs = ["http_json.h"],
+    deps = [
+        "//cuttlefish/common/libs/utils:json",
+        "//cuttlefish/host/libs/web/http_client",
+        "//cuttlefish/host/libs/web/http_client:http_string",
+        "//cuttlefish/host/libs/web/http_client:scrub_secrets",
+        "//cuttlefish/result",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/strings:string_view",
+        "@jsoncpp",
+    ],
+)
+
+cf_cc_library(
+    name = "http_probe",
+    srcs = ["http_probe.cc"],
+    hdrs = ["http_probe.h"],
+    deps = [
+        "//cuttlefish/host/libs/web/http_client",
+        "//cuttlefish/host/libs/web/http_client:scrub_secrets",
+        "//cuttlefish/result",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:string_view",
+    ],
+)
+
+cf_cc_test(
+    name = "http_probe_test",
+    srcs = ["http_probe_test.cc"],
+    deps = [
+        "//cuttlefish/host/libs/web/http_client",
+        "//cuttlefish/host/libs/web/http_client:fake_http_client",
+        "//cuttlefish/host/libs/web/http_client:http_probe",
+        "//cuttlefish/result",
+        "//cuttlefish/result:result_matchers",
+    ],
+)
+
+cf_cc_library(
+    name = "http_string",
+    srcs = ["http_string.cc"],
+    hdrs = ["http_string.h"],
+    deps = [
+        "//cuttlefish/host/libs/web/http_client",
+        "//cuttlefish/result",
+    ],
+)
+
+cf_cc_library(
+    name = "retrying_http_client",
+    srcs = ["retrying_http_client.cc"],
+    hdrs = ["retrying_http_client.h"],
+    deps = [
+        "//cuttlefish/host/libs/web/http_client",
+        "//cuttlefish/result",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:string_view",
+    ],
+)
+
+cf_cc_library(
+    name = "scrub_secrets",
+    srcs = ["scrub_secrets.cc"],
+    hdrs = ["scrub_secrets.h"],
+    deps = ["@abseil-cpp//absl/strings:string_view"],
+)
+
+cf_cc_test(
+    name = "scrub_secrets_test",
+    srcs = ["scrub_secrets_test.cc"],
+    deps = [
+        "//cuttlefish/host/libs/web/http_client:scrub_secrets",
+    ],
+)
+
+cf_cc_library(
+    name = "url_escape",
+    srcs = ["url_escape.cc"],
+    hdrs = ["url_escape.h"],
+    deps = [
+        "//cuttlefish/host/libs/web/http_client:curl_global_init",
+        "@abseil-cpp//absl/strings:string_view",
+        "@curl",
+    ],
+)

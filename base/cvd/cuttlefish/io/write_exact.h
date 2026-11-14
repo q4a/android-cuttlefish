@@ -1,0 +1,45 @@
+//
+// Copyright (C) 2026 The Android Open Source Project
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#pragma once
+
+#include <stdint.h>
+
+#include <string>
+#include <vector>
+
+#include "absl/strings/string_view.h"
+
+#include "cuttlefish/io/writer.h"
+#include "cuttlefish/result/expect.h"
+#include "cuttlefish/result/result_type.h"
+
+namespace cuttlefish {
+
+Result<void, int> WriteExact(Writer&, const void* buf, size_t size);
+Result<void, int> WriteExact(Writer&,
+                             const char* buf);  // Assumes null termination
+Result<void, int> WriteExact(Writer&, const std::string&);
+Result<void, int> WriteExact(Writer&, const std::vector<char>&);
+Result<void, int> WriteExact(Writer&, const std::vector<uint8_t>&);
+Result<void, int> WriteExact(Writer&, absl::string_view);
+
+template <typename T>
+Result<void, int> WriteExactBinary(Writer& writer, const T& data) {
+  const char* const data_char = reinterpret_cast<const char*>(&data);
+  return WriteExact(writer, data_char, sizeof(data));
+}
+
+}  // namespace cuttlefish

@@ -1,0 +1,39 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+package(
+    default_visibility = [
+        "//visibility:public",
+    ],
+)
+
+cc_library(
+    name = "expat",
+    srcs = [
+        "expat_config.h",
+        "lib/xmlparse.c",
+        "lib/xmlrole.c",
+        "lib/xmltok.c",
+    ],
+    hdrs = [
+        "lib/ascii.h",
+        "lib/asciitab.h",
+        "lib/expat.h",
+        "lib/expat_external.h",
+        "lib/iasciitab.h",
+        "lib/internal.h",
+        "lib/latin1tab.h",
+        "lib/nametab.h",
+        "lib/siphash.h",
+        "lib/utf8tab.h",
+        "lib/winconfig.h",
+        "lib/xmlrole.h",
+        "lib/xmltok.h",
+        "lib/xmltok_impl.c",
+        "lib/xmltok_impl.h",
+        "lib/xmltok_ns.c",
+    ],
+    copts = [
+        "-DXML_POOR_ENTROPY",
+    ],
+    strip_include_prefix = "lib",
+)

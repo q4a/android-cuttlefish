@@ -1,0 +1,245 @@
+/*
+ * Copyright (C) 2025 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+#include "cuttlefish/host/commands/cvdalloc/privilege.h"
+
+#include <fcntl.h>
+#include <stddef.h>
+#include <stdlib.h>
+#include <unistd.h>
+#if defined(__linux__)
+#include <elf.h>
+#include <linux/capability.h>
+#include <linux/xattr.h>
+#include <sys/auxv.h>
+#include <sys/prctl.h>
+#include <sys/syscall.h>
+#include <sys/xattr.h>
+#endif
+
+#include <optional>
+#include <utility>
+#include <vector>
+
+#include "absl/log/log.h"
+#include "absl/strings/string_view.h"
+
+#include "cuttlefish/posix/stat.h"
+#include "cuttlefish/posix/strerror.h"
+#include "cuttlefish/result/expect.h"
+#include "cuttlefish/result/result_type.h"
+
+extern char** environ;
+
+namespace cuttlefish {
+
+#if defined(__linux__)
+static int SetAmbientCapabilities() {
+  /*
+   * If we're on Linux, try and set capabilities instead of using setuid.
+   * We need capability CAP_NET_ADMIN, but this won't normally persist
+   * through exec when we shell out to invoke network commands.
+   * Instead, we need to set this as an ambient capability.
+   *
+   * For portability reasons, run the syscall by hand and not drag in a
+   * libcap dependency into bzlmod which is hard to conditionalize.
+   *
+   * TODO: Maybe this is neater with implementing this with netlink.
+   */
+  struct __user_cap_header_struct h = {_LINUX_CAPABILITY_VERSION_3, getpid()};
+  struct __user_cap_data_struct data[2];
+
+  int r = syscall(SYS_capget, &h, data);
+  if (r == -1) {
+    PLOG(INFO) << "SYS_capget";
+    return -1;
+  }
+
+  data[0].inheritable = data[0].permitted;
+  r = syscall(SYS_capset, &h, data);
+  if (r == -1) {
+    PLOG(INFO) << "SYS_capset";
+    return -1;
+  }
+
+  r = prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_RAISE, CAP_NET_ADMIN, 0, 0);
+  if (r == -1) {
+    PLOG(INFO) << "prctl";
+    return -1;
+  }
+
+  r = prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_RAISE, CAP_NET_BIND_SERVICE, 0, 0);
+  if (r == -1) {
+    PLOG(INFO) << "prctl";
+    return -1;
+  }
+
+  r = prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_RAISE, CAP_NET_RAW, 0, 0);
+  if (r == -1) {
+    PLOG(INFO) << "prctl";
+    return -1;
+  }
+
+  return 1;
+}
+#endif
+
+Result<void> ValidateCvdallocBinary(absl::string_view path) {
+  struct stat st = CF_EXPECT(Stat(path));
+#if defined(__linux__)
+  (void)st;
+  /* Try and determine if the cvdalloc binary has any capabilities. */
+  struct vfs_cap_data cap = {};
+  ssize_t s = getxattr(path.data(), XATTR_NAME_CAPS, &cap, sizeof(cap));
+  CF_EXPECTF(
+      s != -1 && (cap.data[0].permitted & (1 << CAP_NET_ADMIN)) != 0,
+      "cvdalloc binary does not have permissions to allocate resources.\n"
+      "As root, please\n\n    setcap cap_net_admin,cap_net_bind_service,"
+      "cap_net_raw=+ep `realpath {}`",
+      path);
+#else
+  CF_EXPECTF(
+      (st.st_mode & S_ISUID) != 0 && st.st_uid == 0,
+      "cvdalloc binary does not have permissions to allocate resources.\n"
+      "As root, please\n\n    chown root {}\n    chmod u+s {}\n\n"
+      "and start the instance again.",
+      path, path);
+#endif
+
+  return {};
+}
+
+namespace {
+
+int BeginElevatedPrivileges() {
+  int r;
+
+#if defined(__linux__)
+  r = SetAmbientCapabilities();
+#else
+  /*
+   * Explicit setuid calls seem to be required.
+   *
+   * This likely has something to do with invoking external commands,
+   * but it isn't clear why an explicit setuid(0) is necessary.
+   * It's possible a Linux kernel bug around permissions checking on tap
+   * devices may be the culprit, which we can't control.
+   */
+  r = setuid(0);
+#endif
+
+  return r;
+}
+
+int DropPrivileges(uid_t orig) {
+#if defined(__linux__)
+  struct __user_cap_header_struct h = {_LINUX_CAPABILITY_VERSION_3, getpid()};
+  struct __user_cap_data_struct data[2];
+  data[0] = {0, 0, 0};
+  data[1] = {0, 0, 0};
+  int r = syscall(SYS_capset, &h, data);
+  if (r == -1) {
+    LOG(INFO) << "SYS_capset: " << StrError();
+    return -1;
+  }
+
+  r = prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL, 0L, 0L, 0L);
+  if (r == -1) {
+    LOG(INFO) << "prctl: " << StrError();
+    return -1;
+  }
+#endif
+
+  return setuid(orig);
+}
+
+constexpr char kTrustedPath[] = "/usr/sbin:/usr/bin:/sbin:/bin";
+
+// Shallow copy environ.
+// Keep pointers alive, since some libcs (e.g. musl)
+// will free them if setenv() is used.
+std::vector<char*> CopyEnv() {
+  std::vector<char*> env;
+  for (char** var = environ; var != nullptr && *var != nullptr; ++var) {
+    env.push_back(*var);
+  }
+  env.push_back(nullptr);
+  return env;
+}
+
+// POSIX allows us to simply restore the saved environment
+// directly into environ.
+void RestoreEnv(std::vector<char*> env) {
+  // Keep restored alive to mirror CopyEnv.
+  static std::vector<char*>& restored = *new std::vector<char*>();
+  restored.swap(env);
+  environ = restored.data();
+}
+
+}  // namespace
+
+// Gains privileges until the returned instance is destroyed. If this process
+// gained privilege at exec, the environment is also replaced with a minimal
+// trusted one until then. Call this, and destroy the result, while no other
+// threads exist. The environment is shared by every thread, and on Linux,
+// the destructor only drops capabilities for its own thread, so threads
+// started in between would stay privileged.
+Result<ScopedPrivileges> ScopedPrivileges::Elevate() {
+  // Constructed first so that a failure below drops any partially raised
+  // capabilities and restores the environment.
+  ScopedPrivileges privileges(getuid());
+  bool should_sanitize_env = true;
+#if defined(__linux__)
+  // The child processes we exec run with elevated privilege (CAP_NET_ADMIN via
+  // ambient caps) but with AT_SECURE=0, so the dynamic linker won't scrub their
+  // environment for us. Only sanitize the environment when this exec actually
+  // gained privilege (e.g. via file caps), as signalled by AT_SECURE.
+  should_sanitize_env = getauxval(AT_SECURE) != 0;
+#endif
+  if (should_sanitize_env) {
+    privileges.saved_env_ = CopyEnv();
+    // Swap the environment out rather than clearenv() it, so that libc doesn't
+    // free the strings saved_env_ points at (see CopyEnv()).
+    static char* empty_env[] = {nullptr};
+    environ = empty_env;
+    CF_EXPECTF(setenv("PATH", kTrustedPath, /*overwrite=*/1) == 0,
+               "Couldn't set PATH: {}", StrError());
+  }
+  CF_EXPECTF(BeginElevatedPrivileges() != -1,
+             "Couldn't elevate permissions: {}", StrError());
+  return privileges;
+}
+
+ScopedPrivileges::ScopedPrivileges(uid_t orig) : orig_(orig) {}
+
+ScopedPrivileges::ScopedPrivileges(ScopedPrivileges&& other) noexcept
+    : orig_(std::exchange(other.orig_, std::nullopt)),
+      saved_env_(std::exchange(other.saved_env_, std::nullopt)) {}
+
+ScopedPrivileges::~ScopedPrivileges() {
+  if (!orig_.has_value()) {
+    return;
+  }
+  if (DropPrivileges(*orig_) == -1) {
+    // We may still be privileged, so keep the trusted environment.
+    LOG(ERROR) << "cvdalloc: couldn't drop privileges: " << StrError();
+    return;
+  }
+  if (saved_env_.has_value()) {
+    RestoreEnv(std::move(*saved_env_));
+  }
+}
+
+}  // namespace cuttlefish

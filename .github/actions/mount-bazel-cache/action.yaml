@@ -1,0 +1,42 @@
+name: 'Mount Bazel cache'
+inputs:
+  action-name:
+    required: true
+  writable:
+    required: false
+    default: "false"
+runs:
+  using: "composite"
+  steps:
+  - name: Generate cache key prefix
+    # Cache is keyed by action definition and target branch. Release branches
+    # (version-*) never fall back to main's cache.
+    run: |
+      JOB_HASH=$(yq . .github/actions/${INPUTS_ACTION_NAME}/action.yaml | sha256sum | cut -d' ' -f1)
+      BRANCH="${GITHUB_BASE_REF:-${GITHUB_REF_NAME}}"
+      PREFIX="${{ runner.os }}-${{ runner.arch }}-bazel-disk-cache-${INPUTS_ACTION_NAME}-${JOB_HASH}"
+      echo "CACHE_KEY_PREFIX=${PREFIX}-${BRANCH}" >> $GITHUB_ENV
+      if [[ "${BRANCH}" != version-* ]]; then
+        echo "FALLBACK_CACHE_KEY_PREFIX=${PREFIX}-main" >> $GITHUB_ENV
+      fi
+    shell: bash
+    env:
+      INPUTS_ACTION_NAME: ${{ inputs.action-name }}
+  - name: Restore cache
+    if: inputs.writable != 'true'
+    uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
+    with:
+      path: ~/bazel-disk-cache
+      key: ${{ format('{0}-{1}-{2}', env.CACHE_KEY_PREFIX, github.sha, github.event_name) }}
+      restore-keys: |
+        ${{ format('{0}-', env.CACHE_KEY_PREFIX) }}
+        ${{ env.FALLBACK_CACHE_KEY_PREFIX && format('{0}-', env.FALLBACK_CACHE_KEY_PREFIX) || '' }}
+  - name: Restore and save cache
+    if: inputs.writable == 'true'
+    uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
+    with:
+      path: ~/bazel-disk-cache
+      key: ${{ format('{0}-{1}-{2}', env.CACHE_KEY_PREFIX, github.sha, github.event_name) }}
+      # Scheduled runs rebuild the cache from scratch.
+      restore-keys: |
+        ${{ github.event_name == 'push' && format('{0}-', env.CACHE_KEY_PREFIX) || '' }}

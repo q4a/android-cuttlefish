@@ -1,0 +1,23 @@
+From 63bf278fa9babdd7b5115921537d89f941b51b29 Mon Sep 17 00:00:00 2001
+Subject: [PATCH 1/4] Use our local_repository.
+
+https://github.com/bazelbuild/bazel/issues/26578
+---
+ MODULE.bazel | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/MODULE.bazel b/MODULE.bazel
+index 10e14bb..b3fd9d1 100644
+--- a/MODULE.bazel
++++ b/MODULE.bazel
+@@ -15,8 +15,8 @@ bazel_dep(name = "openssl", version = "3.3.1.bcr.1")
+ bazel_dep(name = "protobuf", version = "33.4")
+ bazel_dep(name = "gflags", version = "2.2.2.bcr.1")
+ 
+-local_repository = use_repo_rule("@bazel_tools//tools/build_defs/repo:local.bzl", "local_repository")
+-new_local_repository = use_repo_rule("@bazel_tools//tools/build_defs/repo:local.bzl", "new_local_repository")
++local_repository = use_repo_rule("@@//cuttlefish/bazel:local.bzl", "local_repository")
++new_local_repository = use_repo_rule("@@//cuttlefish/bazel:local.bzl", "new_local_repository")
+ 
+ new_local_repository(
+     name = "fmtlib",

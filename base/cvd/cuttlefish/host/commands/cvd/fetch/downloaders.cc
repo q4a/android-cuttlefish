@@ -1,0 +1,175 @@
+//
+// Copyright (C) 2025 The Android Open Source Project
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#include "cuttlefish/host/commands/cvd/fetch/downloaders.h"
+
+#include <chrono>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "cuttlefish/common/libs/utils/environment.h"
+#include "cuttlefish/host/commands/cvd/fetch/build_api_credentials.h"
+#include "cuttlefish/host/commands/cvd/fetch/build_api_flags.h"
+#include "cuttlefish/host/libs/web/android_build.h"
+#include "cuttlefish/host/libs/web/android_build_api.h"
+#include "cuttlefish/host/libs/web/android_build_string/device_build_string.h"
+#include "cuttlefish/host/libs/web/android_build_url.h"
+#include "cuttlefish/host/libs/web/build_api.h"
+#include "cuttlefish/host/libs/web/caching_build_api.h"
+#include "cuttlefish/host/libs/web/cas/cas_downloader.h"
+#include "cuttlefish/host/libs/web/composite_build_api.h"
+#include "cuttlefish/host/libs/web/credential_source/credential_source.h"
+#include "cuttlefish/host/libs/web/fallback_build_api.h"
+#include "cuttlefish/host/libs/web/gcs_build_api.h"
+#include "cuttlefish/host/libs/web/http_build_api.h"
+#include "cuttlefish/host/libs/web/http_client/curl_http_client.h"
+#include "cuttlefish/host/libs/web/http_client/curl_share.h"
+#include "cuttlefish/host/libs/web/http_client/http_client.h"
+#include "cuttlefish/host/libs/web/http_client/http_client_pool.h"
+#include "cuttlefish/host/libs/web/http_client/retrying_http_client.h"
+#include "cuttlefish/host/libs/web/luci_build_api.h"
+#include "cuttlefish/host/libs/web/oauth2_consent.h"
+#include "cuttlefish/result/result.h"
+
+namespace cuttlefish {
+
+struct Downloaders::Impl {
+  Impl() = default;
+  Impl(Impl&) = delete;
+  Impl(Impl&&) = delete;
+  Impl& operator=(Impl&) = delete;
+  Impl& operator=(Impl&&) = delete;
+
+  CurlShare curl_share_;
+  std::unique_ptr<HttpClient> http_pool_;
+  std::unique_ptr<HttpClient> retrying_http_client_;
+  std::unique_ptr<CredentialSource> android_creds_;
+  std::unique_ptr<AndroidBuildUrl> android_build_url_;
+  // Declared before `cas_downloader_`, which downloads digests through it.
+  std::unique_ptr<AndroidBuildApi> android_build_api_;
+  std::unique_ptr<CasDownloader> cas_downloader_;
+  std::unique_ptr<CredentialSource> luci_credential_source_;
+  std::unique_ptr<CredentialSource> gsutil_credential_source_;
+  std::unique_ptr<LuciBuildApi> luci_build_api_;
+  std::unique_ptr<CredentialSource> storage_credential_source_;
+  std::unique_ptr<CompositeBuildApi> composite_build_api_;
+  std::unique_ptr<CachingBuildApi> caching_build_api_;
+
+  std::unique_ptr<HttpClient> MakeHttpClient() {
+    return CurlHttpClient(curl_share_, /* use_logging_debug_function = */ true);
+  }
+};
+
+Downloaders::Downloaders(std::unique_ptr<Downloaders::Impl> impl)
+    : impl_(std::move(impl)) {}
+Downloaders::Downloaders(Downloaders&&) = default;
+Downloaders::~Downloaders() = default;
+
+Result<Downloaders> Downloaders::Create(const BuildApiFlags& flags,
+                                        const std::string& target_directory,
+                                        const std::string& cache_base_path) {
+  std::unique_ptr<Downloaders::Impl> impl(new Downloaders::Impl());
+
+  impl->http_pool_ = std::make_unique<HttpClientPool>(
+      [impl = impl.get()]() { return impl->MakeHttpClient(); });
+
+  impl->retrying_http_client_ = RetryingServerErrorHttpClient(
+      *impl->http_pool_, 10, std::chrono::milliseconds(5000));
+
+  std::vector<std::string> scopes = {
+      kAndroidBuildApiScope,
+      "https://www.googleapis.com/auth/userinfo.email",
+  };
+  Result<std::unique_ptr<CredentialSource>> cvd_creds =
+      CredentialForScopes(*impl->retrying_http_client_, scopes);
+
+  impl->android_creds_ =
+      cvd_creds.has_value() && cvd_creds->get()
+          ? std::move(*cvd_creds)
+          : CF_EXPECT(GetCredentialSourceFromFlags(
+                *impl->retrying_http_client_, flags, GetAcloudOauthFilepath()));
+
+  impl->android_build_url_ = std::make_unique<AndroidBuildUrl>(
+      flags.api_base_url, flags.api_key, flags.project_id);
+
+  impl->android_build_api_ = std::make_unique<AndroidBuildApi>(
+      *impl->retrying_http_client_, *impl->android_build_url_,
+      impl->android_creds_.get(), flags.wait_retry_period);
+
+  // Android Build builds are served by CAS when it is available and can serve
+  // the artifact, and by the Android Build API otherwise.
+  std::vector<BuildApi<DeviceBuildString, DeviceBuild>*> android_backends;
+  Result<std::unique_ptr<CasDownloader>> cas_downloader_result =
+      CasDownloader::Create(flags.cas_downloader_flags,
+                            flags.credential_flags.service_account_filepath,
+                            *impl->android_build_api_);
+  if (cas_downloader_result.has_value()) {
+    impl->cas_downloader_ = std::move(cas_downloader_result.value());
+    android_backends.push_back(impl->cas_downloader_.get());
+  }
+  android_backends.push_back(impl->android_build_api_.get());
+
+  impl->luci_credential_source_ = CF_EXPECT(GetCredentialSourceFromFlags(
+      *impl->retrying_http_client_, flags,
+      StringFromEnv("HOME", ".") + "/.config/chrome_infra/auth/tokens.json"));
+  impl->gsutil_credential_source_ = CF_EXPECT(GetCredentialSourceFromFlags(
+      *impl->retrying_http_client_, flags,
+      StringFromEnv("HOME", ".") + "/.boto", kCloudStorageReadScope));
+
+  impl->luci_build_api_ = std::make_unique<LuciBuildApi>(
+      *impl->retrying_http_client_, impl->luci_credential_source_.get(),
+      impl->gsutil_credential_source_.get());
+
+  // Cloud Storage builds resolve a credential of their own. The gsutil ladder
+  // above stays as it is because the Luci downloads also accept a bare
+  // storage-scoped token minted outside `cvd`.
+  Result<std::unique_ptr<CredentialSource>> storage_creds = CredentialForScopes(
+      *impl->retrying_http_client_, {kCloudStorageReadScope});
+
+  impl->storage_credential_source_ =
+      storage_creds.has_value() && storage_creds->get()
+          ? std::move(*storage_creds)
+          : CF_EXPECT(GetStorageCredentialSource(*impl->retrying_http_client_,
+                                                 flags));
+
+  impl->composite_build_api_ = std::make_unique<CompositeBuildApi>(
+      std::make_unique<FallbackBuildApi<DeviceBuildString, DeviceBuild>>(
+          std::move(android_backends)),
+      std::make_unique<GcsBuildApi>(*impl->retrying_http_client_,
+                                    impl->storage_credential_source_.get()),
+      std::make_unique<HttpBuildApi>(*impl->retrying_http_client_));
+
+  // One cache in front of every source, so that each build keys its artifacts
+  // the way its own source versions them.
+  if (flags.enable_caching) {
+    impl->caching_build_api_ = std::make_unique<CachingBuildApi>(
+        *impl->composite_build_api_, cache_base_path);
+  }
+
+  return Downloaders(std::move(impl));
+}
+
+BuildApi<BuildString, Build>& Downloaders::Builds() {
+  if (impl_->caching_build_api_) {
+    return *impl_->caching_build_api_;
+  }
+  return *impl_->composite_build_api_;
+}
+
+LuciBuildApi& Downloaders::Luci() { return *impl_->luci_build_api_; }
+
+}  // namespace cuttlefish

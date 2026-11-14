@@ -1,0 +1,18 @@
+load("//cuttlefish/bazel:rules.bzl", "cf_cc_binary")
+
+package(
+    default_visibility = ["//:android_cuttlefish"],
+)
+
+cf_cc_binary(
+    name = "tcp_connector",
+    srcs = ["main.cpp"],
+    depend_on_what_you_use_enabled = False,
+    include_cleaner_enabled = False,
+    deps = [
+        "//cuttlefish/common/libs/fs",
+        "//cuttlefish/host/libs/config:logging",
+        "@abseil-cpp//absl/log",
+        "@gflags",
+    ],
+)

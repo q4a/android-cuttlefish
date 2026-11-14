@@ -1,0 +1,449 @@
+//
+// Copyright (C) 2025 The Android Open Source Project
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#include "cuttlefish/host/commands/cvd/fetch/fetch_context.h"
+
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include <string>
+#include <utility>
+#include <variant>
+#include <vector>
+
+#include "absl/log/log.h"
+#include "absl/strings/match.h"
+#include "absl/strings/string_view.h"
+#include "absl/strings/strip.h"
+#include "android-base/file.h"
+#include "fmt/format.h"
+#include "fmt/ranges.h"
+
+#include "cuttlefish/common/libs/utils/files.h"
+#include "cuttlefish/files/copy.h"
+#include "cuttlefish/files/directory_exists.h"
+#include "cuttlefish/files/file_exists.h"
+#include "cuttlefish/files/link_or_copy.h"
+#include "cuttlefish/files/recursively_remove_directory.h"
+#include "cuttlefish/host/commands/cvd/fetch/builds.h"
+#include "cuttlefish/host/commands/cvd/fetch/de_android_sparse.h"
+#include "cuttlefish/host/commands/cvd/fetch/fetch_tracer.h"
+#include "cuttlefish/host/commands/cvd/fetch/target_directories.h"
+#include "cuttlefish/host/libs/avb/avb.h"
+#include "cuttlefish/host/libs/config/fetcher_config.h"
+#include "cuttlefish/host/libs/config/file_source.h"
+#include "cuttlefish/host/libs/web/android_build.h"
+#include "cuttlefish/host/libs/web/build_api.h"
+#include "cuttlefish/host/libs/web/build_api_zip.h"
+#include "cuttlefish/host/libs/web/url_namespace.h"
+#include "cuttlefish/host/libs/zip/libzip_cc/archive.h"
+#include "cuttlefish/host/libs/zip/zip_file.h"
+#include "cuttlefish/posix/remove.h"
+#include "cuttlefish/result/result.h"
+
+namespace cuttlefish {
+
+static constexpr mode_t kRwxAllMode = S_IRWXU | S_IRWXG | S_IRWXO;
+
+using android::base::Dirname;
+
+namespace {
+
+bool IsVbmetaImage(absl::string_view path) {
+  return absl::EndsWith(path, "/vbmeta.img") ||
+         absl::EndsWith(path, "/vbmeta_system.img") ||
+         absl::EndsWith(path, "/vbmeta_system_dlkm.img") ||
+         absl::EndsWith(path, "/vbmeta_vendor_dlkm.img");
+}
+
+void PadVbmetaImage(const std::string& path) {
+  /*
+   * Try enforcing the vbmeta size now. If it fails, then let
+   * `assemble_cvd` trip on it later; don't fail the fetch.
+   */
+  if (Result<void> result = EnforceVbMetaSize(path); !result.has_value()) {
+    LOG(WARNING) << "PadVbmetaImage: failed padding " << path << ": "
+                 << result.error();
+  }
+}
+
+Result<size_t> DirectoryContentsSize(const std::string& dir) {
+  size_t size = 0;
+  CF_EXPECT(
+      WalkDirectory(dir, [&size](const std::string& path) -> Result<void> {
+        if (!DirectoryExists(path)) {
+          size += FileSize(path);
+        }
+        return {};
+      }));
+  return size;
+}
+
+}  // namespace
+
+FetchArtifact::FetchArtifact(FetchBuildContext& context,
+                             std::string artifact_name)
+    : fetch_build_context_(context), artifact_name_(artifact_name) {}
+
+Result<void> FetchArtifact::Download() {
+  CF_EXPECT(DownloadTo(artifact_name_));
+  return {};
+}
+
+Result<void> FetchArtifact::DownloadTo(std::string local_path) {
+  std::string new_path =
+      fmt::format("{}/{}", fetch_build_context_.target_directory_, local_path);
+
+  if (downloaded_path_.empty()) {
+    std::string downloaded =
+        CF_EXPECT(fetch_build_context_.fetch_context_.build_api_.DownloadFile(
+            fetch_build_context_.build_, fetch_build_context_.target_directory_,
+            artifact_name_));
+    is_directory_ = DirectoryExists(downloaded);
+    const size_t size = is_directory_
+                            ? CF_EXPECT(DirectoryContentsSize(downloaded))
+                            : FileSize(downloaded);
+    std::string download_phase = fmt::format("Downloaded '{}'", artifact_name_);
+    fetch_build_context_.trace_.CompletePhase(download_phase, size);
+    if (!is_directory_) {
+      CF_EXPECT(fetch_build_context_.DesparseFiles({artifact_name_}));
+    }
+
+    CF_EXPECT(EnsureDirectoryExists(android::base::Dirname(new_path)));
+    CF_EXPECT(RenameFile(downloaded, new_path));
+
+    downloaded_path_ = new_path;
+    if (!is_directory_ && absl::EndsWith(downloaded_path_, ".zip")) {
+      zip_ = CF_EXPECT(ZipOpenRead(downloaded_path_));
+    }
+  } else {
+    if (is_directory_) {
+      CF_EXPECT(
+          LinkOrCopyDirectoryContentsRecursively(downloaded_path_, new_path));
+    } else {
+      CF_EXPECT(Copy(downloaded_path_, new_path));
+    }
+  }
+
+  if (is_directory_) {
+    // Only the files extracted from the directory go in the fetcher config.
+    return {};
+  }
+
+  if (IsVbmetaImage(new_path)) {
+    PadVbmetaImage(new_path);
+  }
+
+  CF_EXPECT(fetch_build_context_.AddFileToConfig(downloaded_path_));
+
+  return {};
+}
+
+Result<ReadableZip*> FetchArtifact::AsZip() {
+  if (!zip_) {
+    zip_ = CF_EXPECT(
+        ::cuttlefish::OpenZip(fetch_build_context_.fetch_context_.build_api_,
+                              fetch_build_context_.build_, artifact_name_));
+  }
+  return &*zip_;
+}
+
+Result<void> FetchArtifact::ExtractAll() {
+  CF_EXPECT(ExtractAll(""));
+  return {};
+}
+
+Result<void> FetchArtifact::ExtractAll(const std::string& local_path) {
+  if (is_directory_) {
+    std::vector<std::string> members;
+    CF_EXPECT(WalkDirectory(
+        downloaded_path_,
+        [this, &members](const std::string& path) -> Result<void> {
+          if (!DirectoryExists(path)) {
+            members.emplace_back(path.substr(downloaded_path_.size() + 1));
+          }
+          return {};
+        }));
+    for (const std::string& member_name : members) {
+      const std::string extract_path =
+          fmt::format("{}/{}", local_path, member_name);
+      CF_EXPECT(ExtractOneTo(member_name, extract_path));
+    }
+    return {};
+  }
+  ReadableZip* zip = CF_EXPECT(AsZip());
+  size_t entries = CF_EXPECT(zip->NumEntries());
+  for (uint64_t i = 0; i < entries; i++) {
+    std::string member_name = CF_EXPECT(zip->EntryName(i));
+    CF_EXPECT(!absl::StartsWith(member_name, "."));
+    CF_EXPECT(!absl::StartsWith(member_name, "/"));
+    CF_EXPECT(!absl::StrContains(member_name, "/../"));
+    if (!CF_EXPECT(zip->EntryIsDirectory(i))) {
+      std::string extract_path = fmt::format("{}/{}", local_path, member_name);
+      CF_EXPECT(ExtractOneTo(member_name, extract_path));
+    }
+  }
+  return {};
+}
+
+Result<void> FetchArtifact::ExtractOne(const std::string& member_name) {
+  CF_EXPECT(ExtractOneTo(member_name, member_name));
+  return {};
+}
+
+Result<void> FetchArtifact::ExtractOneTo(const std::string& member_name,
+                                         const std::string& local_path) {
+  std::string extract_path =
+      fmt::format("{}/{}", fetch_build_context_.target_directory_, local_path);
+
+  if (std::string dir = android::base::Dirname(extract_path); !dir.empty()) {
+    CF_EXPECT(EnsureDirectoryExists(dir, kRwxAllMode));
+  }
+
+  if (is_directory_) {
+    const std::string member_path =
+        fmt::format("{}/{}", downloaded_path_, member_name);
+    CF_EXPECTF(FileExists(member_path) && !DirectoryExists(member_path),
+               "'{}' not found in '{}'", member_name, downloaded_path_);
+    // Padding and de-sparsing below never modify a shared file in place, so
+    // a hard link to the source is safe even if it is a download cache entry.
+    CF_EXPECT(LinkOrCopy(member_path, extract_path,
+                         /* overwrite_existing = */ true));
+  } else {
+    ReadableZip* zip = CF_EXPECT(AsZip());
+    CF_EXPECT(ExtractFile(*zip, member_name, extract_path),
+              "Failed to extract " << member_name << " to " << extract_path);
+  }
+
+  CF_EXPECT(fetch_build_context_.AddFileToConfig(extract_path, artifact_name_,
+                                                 local_path));
+
+  std::string phase =
+      fmt::format("Extracted '{}' from '{}'", member_name, artifact_name_);
+  fetch_build_context_.trace_.CompletePhase(std::move(phase),
+                                            FileSize(extract_path));
+
+  // TODO: b/471069557 - diagnose unused
+  Result<void> unused = fetch_build_context_.DesparseFiles({local_path});
+
+  if (IsVbmetaImage(extract_path)) {
+    PadVbmetaImage(extract_path);
+  }
+
+  return {};
+}
+
+Result<void> FetchArtifact::DeleteLocalFile() {
+  if (downloaded_path_.empty()) {
+    return {};
+  }
+  if (is_directory_) {
+    CF_EXPECT(RecursivelyRemoveDirectory(downloaded_path_));
+    downloaded_path_ = "";
+    return {};
+  }
+  CF_EXPECT(RemoveFile(downloaded_path_));
+  absl::string_view base_dir =
+      fetch_build_context_.fetch_context_.target_directories_.root;
+  absl::string_view config_name = absl::StripPrefix(downloaded_path_, base_dir);
+  config_name = absl::StripPrefix(config_name, "/");
+  CF_EXPECT(
+      fetch_build_context_.fetch_context_.fetcher_config_.RemoveFileFromConfig(
+          std::string(config_name)));
+  downloaded_path_ = "";
+  return {};
+}
+
+FetchBuildContext::FetchBuildContext(FetchContext& fetch_context,
+                                     ::cuttlefish::Build build,
+                                     absl::string_view target_directory,
+                                     FileSource file_source,
+                                     FetchTracer::Trace trace)
+    : fetch_context_(fetch_context),
+      build_(std::move(build)),
+      target_directory_(target_directory),
+      file_source_(file_source),
+      trace_(trace) {}
+
+const cuttlefish::Build& FetchBuildContext::Build() const { return build_; }
+
+Result<std::string> FetchBuildContext::GetBuildZipName(
+    BuildZipKind kind) const {
+  if (const GcsBuild* gcs = std::get_if<GcsBuild>(&build_)) {
+    if (gcs->object.has_value()) {
+      return CF_EXPECT(ResolveUrlZipName(*gcs->object, kind));
+    }
+    return CF_EXPECT(ResolveUrlZipName(GcsArtifactNames(*gcs), kind));
+  }
+  if (const HttpBuild* http = std::get_if<HttpBuild>(&build_)) {
+    CF_EXPECTF(http->object.has_value(),
+               "Cannot discover the '{}' zip of a directory that has no "
+               "listing.  Name the archive itself in the URL, or use a "
+               "'gs://' URL, which lists its contents.",
+               kind);
+    return CF_EXPECT(ResolveUrlZipName(*http->object, kind));
+  }
+  const std::string product =
+      std::visit([](auto&& arg) { return arg.product; }, build_);
+  const std::string id = std::get<0>(GetBuildIdAndTarget(build_));
+  return fmt::format("{}-{}-{}.zip", product, kind, id);
+}
+
+std::optional<std::string> FetchBuildContext::GetFilepath() const {
+  return ::cuttlefish::GetFilepath(build_);
+}
+
+FetchArtifact FetchBuildContext::Artifact(std::string artifact_name) {
+  return FetchArtifact(*this, std::move(artifact_name));
+}
+
+Result<void> FetchBuildContext::DesparseFiles(std::vector<std::string> files) {
+  std::vector<std::string> full_paths;
+  for (const absl::string_view file : files) {
+    full_paths.emplace_back(fmt::format("{}/{}", target_directory_, file));
+  }
+
+  CF_EXPECT(DeAndroidSparse2(full_paths));
+
+  size_t size = 0;
+  for (const std::string& file : full_paths) {
+    size += FileSize(file);
+  }
+  std::string phase = fmt::format("Desparsed [{}]", fmt::join(files, ", "));
+  trace_.CompletePhase(std::move(phase), size);
+  return {};
+}
+
+Result<void> FetchBuildContext::AddFileToConfig(std::string file,
+                                                std::string archive_name,
+                                                std::string archive_path) {
+  auto [build_id, build_target] = GetBuildIdAndTarget(build_);
+
+  CvdFile config_member = CF_EXPECT(BuildFetcherConfigMember(
+      file_source_, std::move(build_id), std::move(build_target),
+      std::move(file), fetch_context_.target_directories_.root,
+      std::move(archive_name), std::move(archive_path)));
+
+  CF_EXPECT(fetch_context_.fetcher_config_.add_cvd_file(
+      std::move(config_member), /* override_entry = */ true));
+
+  return {};
+}
+
+std::ostream& operator<<(std::ostream& out, const FetchBuildContext& context) {
+  return out << FetchLabel(context.Build());
+}
+
+FetchContext::FetchContext(BuildApi<BuildString, Build>& build_api,
+                           const TargetDirectories& target_directories,
+                           const Builds& builds, FetcherConfig& fetcher_config,
+                           FetchTracer& tracer)
+    : build_api_(build_api),
+      target_directories_(target_directories),
+      builds_(builds),
+      fetcher_config_(fetcher_config),
+      tracer_(tracer) {}
+
+std::optional<FetchBuildContext> FetchContext::DefaultBuild() {
+  if (builds_.default_build) {
+    return FetchBuildContext(
+        *this, *builds_.default_build, target_directories_.root,
+        FileSource::DEFAULT_BUILD, tracer_.NewTrace("Default"));
+  } else {
+    return {};
+  }
+}
+
+std::optional<FetchBuildContext> FetchContext::SystemBuild() {
+  if (builds_.system) {
+    return FetchBuildContext(*this, *builds_.system, target_directories_.root,
+                             FileSource::SYSTEM_BUILD,
+                             tracer_.NewTrace("System"));
+  } else {
+    return {};
+  }
+}
+
+std::optional<FetchBuildContext> FetchContext::KernelBuild() {
+  if (builds_.kernel) {
+    return FetchBuildContext(*this, *builds_.kernel, target_directories_.root,
+                             FileSource::KERNEL_BUILD,
+                             tracer_.NewTrace("Kernel"));
+  } else {
+    return {};
+  }
+}
+
+std::optional<FetchBuildContext> FetchContext::BootBuild() {
+  if (builds_.boot) {
+    return FetchBuildContext(*this, *builds_.boot, target_directories_.root,
+                             FileSource::BOOT_BUILD, tracer_.NewTrace("Boot"));
+  } else {
+    return {};
+  }
+}
+
+std::optional<FetchBuildContext> FetchContext::VendorBootImageBuild() {
+  if (builds_.vendor_boot_image) {
+    return FetchBuildContext(
+        *this, *builds_.vendor_boot_image, target_directories_.root,
+        FileSource::VENDOR_BOOT_IMAGE_BUILD, tracer_.NewTrace("Vendor Boot"));
+  } else {
+    return {};
+  }
+}
+
+std::optional<FetchBuildContext> FetchContext::BootloaderBuild() {
+  if (builds_.bootloader) {
+    return FetchBuildContext(
+        *this, *builds_.bootloader, target_directories_.root,
+        FileSource::BOOTLOADER_BUILD, tracer_.NewTrace("Bootloader"));
+  } else {
+    return {};
+  }
+}
+
+std::optional<FetchBuildContext> FetchContext::AndroidEfiLoaderBuild() {
+  if (builds_.android_efi_loader) {
+    return FetchBuildContext(*this, *builds_.android_efi_loader,
+                             target_directories_.root,
+                             FileSource::ANDROID_EFI_LOADER_BUILD,
+                             tracer_.NewTrace("Android EFI Loader"));
+  } else {
+    return {};
+  }
+}
+
+std::optional<FetchBuildContext> FetchContext::OtaToolsBuild() {
+  if (builds_.otatools) {
+    return FetchBuildContext(
+        *this, *builds_.otatools, target_directories_.otatools,
+        FileSource::DEFAULT_BUILD, tracer_.NewTrace("OTA Tools"));
+  } else {
+    return {};
+  }
+}
+
+std::optional<FetchBuildContext> FetchContext::TestSuitesBuild() {
+  if (builds_.test_suites) {
+    return FetchBuildContext(
+        *this, *builds_.test_suites, target_directories_.test_suites,
+        FileSource::TEST_SUITES_BUILD, tracer_.NewTrace("Test Suites"));
+  } else {
+    return {};
+  }
+}
+
+}  // namespace cuttlefish

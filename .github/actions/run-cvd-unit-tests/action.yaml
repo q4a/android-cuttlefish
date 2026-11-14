@@ -1,0 +1,48 @@
+name: 'Run cvd unit tests'
+runs:
+  using: "composite"
+  steps:
+  - name: Setup apt
+    run: |
+      sudo apt-get purge firefox
+      sudo apt-get update -y && sudo apt-get upgrade -y
+    shell: bash
+  - name: Install dependencies
+    run: |
+      sudo apt-get install -y \
+        autoconf \
+        clang \
+        clang-tidy \
+        cmake \
+        git \
+        libaom-dev \
+        libcap-dev \
+        libcurl4-openssl-dev \
+        libgbm-dev \
+        liblzma-dev \
+        libopus-dev \
+        libtool \
+        libvpx-dev \
+        libwayland-dev \
+        protobuf-compiler \
+        xxd
+      wget http://security.ubuntu.com/ubuntu/pool/universe/n/ncurses/libtinfo5_6.3-2_amd64.deb
+      sudo dpkg -i libtinfo5_6.3-2_amd64.deb
+    shell: bash
+  - name: Install bazel
+    run: sudo tools/buildutils/installbazel.sh
+    shell: bash
+  - name: Allow unprivileged user namespaces
+    run: |
+      # The host_tests sandbox harness is rootless and needs unprivileged user
+      # namespaces.
+      if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+        sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      fi
+    shell: bash
+  - name: Vendor git dependencies
+    run: tools/buildutils/vendor_git_repos.sh
+    shell: bash
+  - name: Run unit tests
+    run: cd base/cvd && bazel test --disk_cache=$HOME/bazel-disk-cache --sandbox_writable_path=$HOME --test_output=errors --test_env=HOST_TESTS_REQUIRE_SANDBOX=1 ...
+    shell: bash

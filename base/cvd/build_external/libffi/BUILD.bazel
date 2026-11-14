@@ -1,0 +1,3 @@
+exports_files([
+    "gen_ffi_header.sh",
+])
